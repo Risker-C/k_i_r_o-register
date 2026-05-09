@@ -586,15 +586,21 @@ async def register(headless=True, auto_login=True, skip_onboard=True,
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=IsolateOrigins,site-per-process",
                 "--no-first-run",
+                "--no-default-browser-check",
                 f"--window-size={fp_config['screen']['width']},{fp_config['screen']['height']}",
                 "--disable-background-timer-throttling",
                 "--disable-backgrounding-occluded-windows",
                 "--disable-renderer-backgrounding",
+                f"--lang={fp_config['locale']}",
+                "--enable-features=NetworkService,NetworkServiceInProcess",
+                "--password-store=basic",
+                "--use-mock-keychain",
             ]
+            # 用 headless=False + 最小化规避 TES 对 headless flag 的检测
+            actual_headless = False
             if headless:
-                launch_args += ["--disable-gpu", "--no-sandbox",
-                                "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-            browser = await p.chromium.launch(headless=headless, args=launch_args)
+                launch_args += ["--window-position=-2000,-2000"]
+            browser = await p.chromium.launch(headless=actual_headless, args=launch_args)
             context = await browser.new_context(
                 viewport=fp_config["viewport"],
                 screen=fp_config["screen"],
@@ -758,7 +764,7 @@ async def register(headless=True, auto_login=True, skip_onboard=True,
                     return "EMAIL"
                 if "awsapps.com" in result["url"] and result["hasConsentBtn"]:
                     return "CONSENT"
-                if "profile.aws" in result["url"] and not result["isLoading"]:
+                if result["urlHasOtp"] and not result["isLoading"]:
                     return "OTP"
                 if result["isLoading"]:
                     return "LOADING"
@@ -794,33 +800,51 @@ async def register(headless=True, auto_login=True, skip_onboard=True,
                             break
                     except Exception:
                         await asyncio.sleep(1)
+                # 诊断：打印所有可见按钮
+                try:
+                    btns_info = await page.evaluate("""() => {
+                        return Array.from(document.querySelectorAll('button')).filter(b => b.offsetWidth > 0).map(b => ({
+                            text: b.innerText.trim().slice(0, 40),
+                            type: b.type,
+                            disabled: b.disabled,
+                        }));
+                    }""")
+                    log(f"页面按钮: {btns_info}", "dbg")
+                except Exception as _e:
+                    log(f"按钮诊断失败: {_e}", "dbg")
+
                 for attempt in range(3):
                     clicked = False
                     try:
                         for sel in [
-                            'xpath=//form//button[@type="submit"]',
-                            'xpath=//button[contains(text(),"Continue")]',
-                            'xpath=//button[@type="submit"]',
+                            'xpath=//button[contains(.,"Continue")]',
+                            'xpath=//button[contains(.,"Next")]',
+                            'xpath=//form//button[@type="submit"][2]',
                         ]:
                             btn = page.locator(sel)
                             if await btn.count() > 0 and await btn.first.is_visible():
+                                await _move_to_element(page, btn.first)
                                 await btn.first.click()
                                 clicked = True
+                                log(f"点击按钮: {sel}", "dbg")
                                 break
                         if not clicked:
                             await page.keyboard.press("Enter")
-                    except Exception:
-                        pass
+                            log("按 Enter 提交", "dbg")
+                    except Exception as _e:
+                        log(f"按钮点击异常: {_e}", "dbg")
                     await asyncio.sleep(4)
                     new_state = await detect_state()
                     if new_state != "NAME":
                         log("姓名已提交", "ok")
                         break
                 state = await detect_state()
+            log(f"姓名提交后状态: {state}, URL: {page.url[:80]}", "dbg")
 
             # Phase 4: OTP 验证
             if state not in ["DONE", "PASSWORD", "CONSENT", "CALLBACK"]:
                 state = await wait_for_state(["OTP", "PASSWORD", "CONSENT", "DONE"], timeout=30)
+            log(f"等待后状态: {state}, URL: {page.url[:80]}", "dbg")
 
             if state == "OTP":
                 log("阶段 4: OTP 验证")

@@ -1339,10 +1339,25 @@ class App(tk.Tk):
 
         row2 = ttk.Frame(mail_frame)
         row2.pack(fill="x", pady=2)
-        ttk.Label(row2, text="API Key:", width=8).pack(side="left")
+        self._reg_row2_label = ttk.Label(row2, text="API Key:", width=8)
+        self._reg_row2_label.pack(side="left")
         self._reg_mail_key = tk.StringVar(value=cfg.get("mail_key", ""))
         self._reg_mail_key_entry = ttk.Entry(row2, textvariable=self._reg_mail_key, width=45, show="*")
         self._reg_mail_key_entry.pack(side="left", padx=4)
+
+        row3 = ttk.Frame(mail_frame)
+        row3.pack(fill="x", pady=2)
+        ttk.Label(row3, text="用户名:", width=8).pack(side="left")
+        self._reg_mail_user = tk.StringVar(value=cfg.get("mail_user", ""))
+        self._reg_mail_user_entry = ttk.Entry(row3, textvariable=self._reg_mail_user, width=45)
+        self._reg_mail_user_entry.pack(side="left", padx=4)
+
+        row4 = ttk.Frame(mail_frame)
+        row4.pack(fill="x", pady=2)
+        ttk.Label(row4, text="密码:", width=8).pack(side="left")
+        self._reg_mail_pass = tk.StringVar(value=cfg.get("mail_pass", ""))
+        self._reg_mail_pass_entry = ttk.Entry(row4, textvariable=self._reg_mail_pass, width=45, show="*")
+        self._reg_mail_pass_entry.pack(side="left", padx=4)
 
         def _on_provider_change(*_):
             display = self._reg_mail_provider.get()
@@ -1350,9 +1365,18 @@ class App(tk.Tk):
             if name == "tempforward":
                 self._reg_mail_key_entry.configure(state="disabled")
                 self._reg_domain_combo.configure(state="disabled")
+                self._reg_mail_user_entry.configure(state="disabled")
+                self._reg_mail_pass_entry.configure(state="disabled")
+            elif name == "cftempmail":
+                self._reg_mail_key_entry.configure(state="disabled")
+                self._reg_domain_combo.configure(state="readonly")
+                self._reg_mail_user_entry.configure(state="normal")
+                self._reg_mail_pass_entry.configure(state="normal")
             else:
                 self._reg_mail_key_entry.configure(state="normal")
                 self._reg_domain_combo.configure(state="readonly")
+                self._reg_mail_user_entry.configure(state="disabled")
+                self._reg_mail_pass_entry.configure(state="disabled")
         self._reg_mail_provider.trace_add("write", _on_provider_change)
         _on_provider_change()
 
@@ -1385,6 +1409,8 @@ class App(tk.Tk):
                 "mail_provider": provider_name,
                 "mail_url": self._reg_mail_url.get().strip(),
                 "mail_key": self._reg_mail_key.get().strip(),
+                "mail_user": self._reg_mail_user.get().strip(),
+                "mail_pass": self._reg_mail_pass.get().strip(),
                 "mail_domain_id": domain_val,
                 "cdk_code": self._reg_cdk_code.get().strip(),
                 "yescaptcha_key": self._reg_yescaptcha_key.get().strip(),
@@ -1393,6 +1419,8 @@ class App(tk.Tk):
         self._reg_mail_provider.trace_add("write", _save_mail_config)
         self._reg_mail_url.trace_add("write", _save_mail_config)
         self._reg_mail_key.trace_add("write", _save_mail_config)
+        self._reg_mail_user.trace_add("write", _save_mail_config)
+        self._reg_mail_pass.trace_add("write", _save_mail_config)
         self._reg_mail_domain_id.trace_add("write", _save_mail_config)
         self._reg_cdk_code.trace_add("write", _save_mail_config)
         self._reg_yescaptcha_key.trace_add("write", _save_mail_config)
@@ -1499,23 +1527,28 @@ class App(tk.Tk):
 
         # Check playwright browser is installed
         try:
-            from playwright._impl._driver import compute_driver_executable
-            driver_exec = compute_driver_executable()
-            if not Path(driver_exec).exists():
-                raise FileNotFoundError(driver_exec)
+            import playwright._impl._driver as _drv
+            pkg_dir = Path(_drv.__file__).parent.parent
+            _candidate_dirs = [
+                pkg_dir / "driver" / "package" / ".local-browsers",
+                Path.home() / "Library" / "Caches" / "ms-playwright",
+                Path.home() / "AppData" / "Local" / "ms-playwright",
+                Path("/root/.cache/ms-playwright"),
+            ]
+            env_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+            if env_path:
+                _candidate_dirs.insert(0, Path(env_path))
+            found = any(
+                d.exists() and list(d.glob("chromium*"))
+                for d in _candidate_dirs
+            )
+            if not found:
+                self._reg_term.delete("1.0", "end")
+                self._reg_term.insert("end", "Playwright 浏览器未安装，请运行:\n\n", "err")
+                self._reg_term.insert("end", "  python3 -m playwright install chromium\n", "highlight")
+                return
         except Exception:
-            try:
-                import playwright._impl._driver as _drv
-                browsers_path = Path(_drv.__file__).parent.parent / "driver" / "package" / ".local-browsers"
-                if not browsers_path.exists():
-                    user_browsers = Path.home() / "AppData" / "Local" / "ms-playwright"
-                    if not user_browsers.exists():
-                        self._reg_term.delete("1.0", "end")
-                        self._reg_term.insert("end", "Playwright 浏览器未安装，请运行:\n\n", "err")
-                        self._reg_term.insert("end", "  playwright install chromium\n", "highlight")
-                        return
-            except Exception:
-                pass
+            pass
 
         self._reg_running = True
         self._reg_cancel = False
@@ -1710,6 +1743,9 @@ class App(tk.Tk):
             kwargs = {"base_url": base_url}
             if provider_name == "shiromail":
                 kwargs["api_key"] = api_key
+            elif provider_name == "cftempmail":
+                kwargs["username"] = self._reg_mail_user.get().strip()
+                kwargs["password"] = self._reg_mail_pass.get().strip()
             provider = get_provider(provider_name, **kwargs)
             domains = provider.list_domains()
             if domains:
@@ -1846,6 +1882,10 @@ class App(tk.Tk):
         if provider_name == "shiromail":
             provider_kwargs["api_key"] = mail_key or ""
             provider_kwargs["domain_id"] = mail_domain_id
+        elif provider_name == "cftempmail":
+            provider_kwargs["username"] = self._reg_mail_user.get().strip()
+            provider_kwargs["password"] = self._reg_mail_pass.get().strip()
+            provider_kwargs["domain"] = mail_domain_id or ""
         mail_instance = get_provider(provider_name, **provider_kwargs)
         return await kiro_register.register(
             headless=headless,
