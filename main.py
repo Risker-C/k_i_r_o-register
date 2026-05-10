@@ -1283,12 +1283,14 @@ class App(tk.Tk):
         self._reg_skip_onboard = tk.BooleanVar(value=True)
         self._reg_pro_trial = tk.BooleanVar(value=True)
         self._reg_import_no_trial = tk.BooleanVar(value=False)
+        self._reg_use_roxy = tk.BooleanVar(value=False)
 
         ttk.Checkbutton(opts_frame, text="无头模式", variable=self._reg_headless).pack(side="left", padx=(0, 12))
         ttk.Checkbutton(opts_frame, text="自动登录", variable=self._reg_auto_login).pack(side="left", padx=(0, 12))
         ttk.Checkbutton(opts_frame, text="跳过引导", variable=self._reg_skip_onboard).pack(side="left", padx=(0, 12))
         ttk.Checkbutton(opts_frame, text="Pro试用订阅", variable=self._reg_pro_trial).pack(side="left", padx=(0, 12))
         ttk.Checkbutton(opts_frame, text="无试用仍入库", variable=self._reg_import_no_trial).pack(side="left", padx=(0, 12))
+        ttk.Checkbutton(opts_frame, text="指纹浏览器", variable=self._reg_use_roxy).pack(side="left", padx=(0, 12))
 
         btn_frame = ttk.Frame(opts_frame)
         btn_frame.pack(side="right")
@@ -1398,6 +1400,14 @@ class App(tk.Tk):
         ttk.Entry(yc_row, textvariable=self._reg_yescaptcha_key, width=45).pack(side="left", padx=4)
         ttk.Label(yc_row, text="(API Key, 用于 hCaptcha 自动求解)", foreground="#8b949e").pack(side="left", padx=4)
 
+        # RoxyBrowser 指纹浏览器配置
+        roxy_row = ttk.Frame(cdk_frame)
+        roxy_row.pack(fill="x", pady=2)
+        ttk.Label(roxy_row, text="Roxy Key:", width=8).pack(side="left")
+        self._reg_roxy_key = tk.StringVar(value=cfg.get("roxy_api_key", ""))
+        ttk.Entry(roxy_row, textvariable=self._reg_roxy_key, width=45).pack(side="left", padx=4)
+        ttk.Label(roxy_row, text="(RoxyBrowser API Key, 勾选'指纹浏览器'时使用)", foreground="#8b949e").pack(side="left", padx=4)
+
         # 值变化时自动保存
         def _save_mail_config(*_):
             domain_val = self._reg_mail_domain_id.get().strip()
@@ -1414,6 +1424,7 @@ class App(tk.Tk):
                 "mail_domain_id": domain_val,
                 "cdk_code": self._reg_cdk_code.get().strip(),
                 "yescaptcha_key": self._reg_yescaptcha_key.get().strip(),
+                "roxy_api_key": self._reg_roxy_key.get().strip(),
                 "auto_refresh_min": self._auto_refresh_min.get().strip(),
             })
         self._reg_mail_provider.trace_add("write", _save_mail_config)
@@ -1424,6 +1435,7 @@ class App(tk.Tk):
         self._reg_mail_domain_id.trace_add("write", _save_mail_config)
         self._reg_cdk_code.trace_add("write", _save_mail_config)
         self._reg_yescaptcha_key.trace_add("write", _save_mail_config)
+        self._reg_roxy_key.trace_add("write", _save_mail_config)
 
         # Terminal output
         term_frame = ttk.Frame(tab)
@@ -1564,6 +1576,7 @@ class App(tk.Tk):
         skip_onboard = self._reg_skip_onboard.get()
         pro_trial = self._reg_pro_trial.get()
         import_no_trial = self._reg_import_no_trial.get()
+        use_roxy = self._reg_use_roxy.get()
 
         MAX_RETRY = 5
 
@@ -1663,7 +1676,7 @@ class App(tk.Tk):
                     self._reg_queue.put((f"[{attempt}/{MAX_RETRY}] 注册线程已启动，正在初始化...", "info"))
                     try:
                         result = loop.run_until_complete(
-                            self._reg_async_main(headless, auto_login, skip_onboard)
+                            self._reg_async_main(headless, auto_login, skip_onboard, use_roxy=use_roxy)
                         )
                     except Exception as e:
                         self._reg_queue.put((f"注册异常: {e}", "err"))
@@ -1864,9 +1877,8 @@ class App(tk.Tk):
         }
         db_upsert_account(self.conn, account_data)
 
-    async def _reg_async_main(self, headless=True, auto_login=True, skip_onboard=True):
-        """调用 kiro_register 模块执行完整注册流程"""
-        import kiro_register
+    async def _reg_async_main(self, headless=True, auto_login=True, skip_onboard=True, use_roxy=False):
+        """调用 kiro_register 或 roxy_register 模块执行完整注册流程"""
         from mail_providers import get_provider
         mail_url = self._reg_mail_url.get().strip() or None
         mail_key = self._reg_mail_key.get().strip() or None
@@ -1887,14 +1899,32 @@ class App(tk.Tk):
             provider_kwargs["password"] = self._reg_mail_pass.get().strip()
             provider_kwargs["domain"] = mail_domain_id or ""
         mail_instance = get_provider(provider_name, **provider_kwargs)
-        return await kiro_register.register(
-            headless=headless,
-            auto_login=auto_login,
-            skip_onboard=skip_onboard,
-            mail_provider_instance=mail_instance,
-            log=self._reg_log,
-            cancel_check=lambda: self._reg_cancel,
-        )
+
+        if use_roxy:
+            from roxy_register import register_with_roxy
+            roxy_key = self._reg_roxy_key.get().strip()
+            if not roxy_key:
+                self._reg_log("未填写 RoxyBrowser API Key!", "err")
+                return None
+            return await register_with_roxy(
+                api_key=roxy_key,
+                headless=headless,
+                auto_login=auto_login,
+                skip_onboard=skip_onboard,
+                mail_provider_instance=mail_instance,
+                log=self._reg_log,
+                cancel_check=lambda: self._reg_cancel,
+            )
+        else:
+            import kiro_register
+            return await kiro_register.register(
+                headless=headless,
+                auto_login=auto_login,
+                skip_onboard=skip_onboard,
+                mail_provider_instance=mail_instance,
+                log=self._reg_log,
+                cancel_check=lambda: self._reg_cancel,
+            )
 
     async def _reg_pro_trial_subscribe(self, result, loop):
         """注册完成后自动订阅 Pro 试用 (使用 EFunCard 虚拟信用卡)"""
