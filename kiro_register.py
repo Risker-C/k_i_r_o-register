@@ -230,6 +230,66 @@ def _build_fingerprint_script(fp_config):
             Object.defineProperty(navigator.connection, 'rtt', {get: () => [50, 100, 150][Math.floor(Math.random() * 3)]});
             Object.defineProperty(navigator.connection, 'downlink', {get: () => [1.5, 2.5, 5, 10][Math.floor(Math.random() * 4)]});
         }
+
+        // Battery API - 返回真实感的电池状态
+        if (!navigator.getBattery) {
+            navigator.getBattery = () => Promise.resolve({
+                charging: Math.random() > 0.3,
+                chargingTime: Math.random() > 0.5 ? Infinity : Math.floor(Math.random() * 7200),
+                dischargingTime: Math.floor(Math.random() * 20000) + 3600,
+                level: 0.3 + Math.random() * 0.65,
+                addEventListener: () => {},
+            });
+        }
+
+        // Performance.now() 微小噪声，防止精确计时检测
+        const perfNowOrig = Performance.prototype.now;
+        Performance.prototype.now = function() {
+            return perfNowOrig.call(this) + Math.random() * 0.1;
+        };
+
+        // Date.now() 微小偏移
+        const dateNowOrig = Date.now;
+        Date.now = function() {
+            return dateNowOrig() + Math.floor(Math.random() * 2);
+        };
+
+        // 隐藏 webdriver 标志
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        delete navigator.__proto__.webdriver;
+
+        // Chrome runtime 模拟
+        if (!window.chrome) {
+            window.chrome = {runtime: {}, loadTimes: () => ({}), csi: () => ({})};
+        }
+
+        // Plugin 模拟
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => {
+                const arr = [
+                    {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
+                    {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: ''},
+                    {name: 'Native Client', filename: 'internal-nacl-plugin', description: ''},
+                ];
+                arr.item = (i) => arr[i];
+                arr.namedItem = (n) => arr.find(p => p.name === n);
+                arr.refresh = () => {};
+                return arr;
+            }
+        });
+
+        // MimeTypes 模拟
+        Object.defineProperty(navigator, 'mimeTypes', {
+            get: () => {
+                const arr = [
+                    {type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format'},
+                    {type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format'},
+                ];
+                arr.item = (i) => arr[i];
+                arr.namedItem = (n) => arr.find(m => m.type === n);
+                return arr;
+            }
+        });
     }"""
 
 
@@ -613,6 +673,18 @@ async def register(headless=True, auto_login=True, skip_onboard=True,
             page = await context.new_page()
             await Stealth().apply_stealth_async(page)
 
+            # 拦截 profile.aws API 响应用于调试
+            async def _on_profile_response(response):
+                url = response.url
+                if "profile.aws" in url and "/api/" in url:
+                    try:
+                        body = await response.text()
+                        endpoint = url.split("/api/")[-1]
+                        log(f"[API] {endpoint} → {response.status} {body[:150]}", "dbg")
+                    except Exception:
+                        pass
+            page.on("response", _on_profile_response)
+
             # 注入深度指纹覆盖
             await context.add_init_script(_build_fingerprint_script(fp_config))
 
@@ -711,6 +783,23 @@ async def register(headless=True, auto_login=True, skip_onboard=True,
                 callback_server.shutdown()
                 return _partial_result("未到达注册页面")
 
+            # 预热行为：模拟真实用户浏览页面，让 TES 收集正常行为数据
+            try:
+                vp = page.viewport_size
+                for _ in range(3):
+                    await page.mouse.move(
+                        _random.randint(100, vp["width"] - 100),
+                        _random.randint(100, vp["height"] - 100),
+                        steps=_random.randint(10, 25)
+                    )
+                    await asyncio.sleep(_random.uniform(0.3, 0.8))
+                await page.mouse.wheel(0, _random.randint(50, 150))
+                await asyncio.sleep(_random.uniform(0.5, 1.0))
+                await page.mouse.wheel(0, -_random.randint(30, 80))
+                await asyncio.sleep(_random.uniform(0.3, 0.6))
+            except Exception:
+                pass
+
             # ─── 状态机 ───────────────────────────────────────────────────
             async def detect_state():
                 if authorization_code:
@@ -727,7 +816,9 @@ async def register(headless=True, auto_login=True, skip_onboard=True,
                         const otpInput = document.querySelector('input[inputmode="numeric"]') ||
                                          document.querySelector('input[autocomplete="one-time-code"]') ||
                                          document.querySelector('input[name*="otp"]') ||
-                                         document.querySelector('input[name*="code"]');
+                                         document.querySelector('input[name*="code"]') ||
+                                         document.querySelector('input[placeholder*="6-digit"]') ||
+                                         document.querySelector('input[placeholder*="digit"]');
                         const emailInput = document.querySelector('input[type="email"]');
                         const urlHasOtp = url.includes('verify-otp') || url.includes('otp');
                         // 检测是否为授权同意页面（有 allow/authorize 按钮）
@@ -848,32 +939,65 @@ async def register(headless=True, auto_login=True, skip_onboard=True,
 
             if state == "OTP":
                 log("阶段 4: OTP 验证")
+                # 等待 profile.aws 页面 React 渲染完成
+                await asyncio.sleep(3)
                 otp_selectors = [
                     'xpath=//input[@inputmode="numeric"]',
                     'xpath=//input[@autocomplete="one-time-code"]',
-                    'xpath=//input[contains(@name,"otp") or contains(@name,"code")]',
-                    'xpath=//input[contains(@id,"otp") or contains(@id,"code")]',
-                    'xpath=//input[contains(@placeholder,"code") or contains(@placeholder,"Code")]',
+                    'xpath=//input[contains(@placeholder,"6-digit") or contains(@placeholder,"digit")]',
+                    'xpath=//input[contains(@name,"otp") or contains(@name,"code") or contains(@name,"verif")]',
+                    'xpath=//input[contains(@id,"otp") or contains(@id,"code") or contains(@id,"verif")]',
+                    'xpath=//input[contains(@placeholder,"code") or contains(@placeholder,"Code") or contains(@placeholder,"验证")]',
+                    'xpath=//input[contains(@aria-label,"code") or contains(@aria-label,"verif")]',
+                    'xpath=//input[contains(@class,"verification") or contains(@class,"otp")]',
+                    'css=input[data-testid*="code"]',
+                    'css=input[data-testid*="otp"]',
+                    'css=input[data-testid*="verif"]',
                 ]
                 otp_input = None
-                for sel in otp_selectors:
-                    loc = page.locator(sel)
-                    if await loc.count() > 0 and await loc.first.is_visible():
-                        otp_input = loc.first
+                # 重试最多 3 次，每次等 2 秒（应对 React 渲染延迟）
+                for retry in range(3):
+                    for sel in otp_selectors:
+                        loc = page.locator(sel)
+                        if await loc.count() > 0 and await loc.first.is_visible():
+                            otp_input = loc.first
+                            break
+                    if otp_input:
                         break
-                if not otp_input:
-                    all_inp = page.locator('xpath=//input[not(@type="hidden")]')
+                    # fallback: 找页面上唯一可见的 text/tel/number 输入框
+                    all_inp = page.locator('xpath=//input[not(@type="hidden") and not(@type="password") and not(@type="email")]')
                     for i in range(await all_inp.count()):
                         inp = all_inp.nth(i)
                         if await inp.is_visible():
                             inp_type = await inp.get_attribute("type") or "text"
-                            inp_ph = await inp.get_attribute("placeholder") or ""
-                            if inp_type in ("text", "tel", "number", "") and "Silva" not in inp_ph:
+                            if inp_type in ("text", "tel", "number", ""):
                                 otp_input = inp
                                 break
+                    if otp_input:
+                        break
+                    if retry < 2:
+                        log(f"OTP 输入框未就绪，等待重试 ({retry+1}/3)...")
+                        await asyncio.sleep(2)
 
                 if not otp_input:
-                    log("未找到 OTP 输入框!", "err")
+                    # 调试：dump 页面上所有 input 的属性
+                    debug_info = await page.evaluate("""() => {
+                        const inputs = document.querySelectorAll('input');
+                        return Array.from(inputs).map(el => ({
+                            type: el.type, name: el.name, id: el.id,
+                            placeholder: el.placeholder,
+                            inputmode: el.inputMode,
+                            autocomplete: el.autocomplete,
+                            ariaLabel: el.getAttribute('aria-label'),
+                            className: el.className.substring(0, 80),
+                            dataTestId: el.getAttribute('data-testid'),
+                            visible: el.offsetWidth > 0 && el.offsetHeight > 0,
+                            tagPath: el.closest('[class]')?.className?.substring(0, 60) || ''
+                        }));
+                    }""")
+                    log(f"未找到 OTP 输入框! 页面 input 元素 dump:", "err")
+                    for info in debug_info:
+                        log(f"  {info}", "err")
                     await browser.close()
                     callback_server.shutdown()
                     return _partial_result("OTP输入框未找到")
@@ -887,29 +1011,81 @@ async def register(headless=True, auto_login=True, skip_onboard=True,
                     return _partial_result("OTP超时")
 
                 log(f"获取到验证码: {otp_code}", "ok")
-                # 模拟人类从邮箱复制验证码回来的延迟
-                await _human_delay(5, 12)
+                # 模拟人类从邮箱切回来的行为：先移动鼠标到页面中央区域
+                await _human_delay(2, 4)
+                try:
+                    vp = page.viewport_size
+                    await page.mouse.move(
+                        vp["width"] * _random.uniform(0.3, 0.7),
+                        vp["height"] * _random.uniform(0.3, 0.5),
+                        steps=_random.randint(8, 20)
+                    )
+                    await asyncio.sleep(_random.uniform(0.3, 0.8))
+                except Exception:
+                    pass
                 await _move_to_element(page, otp_input)
-                await _human_type(page, otp_input, otp_code, min_delay=60, max_delay=180)
+                await otp_input.click()
+                await asyncio.sleep(_random.uniform(0.3, 0.6))
+                # 逐字输入 OTP，不用 fill 避免 React 受控组件问题
+                for ch in otp_code:
+                    await page.keyboard.type(ch, delay=0)
+                    await asyncio.sleep(_random.uniform(0.05, 0.15))
                 await _human_delay(0.8, 1.5)
 
-                for attempt in range(3):
+                # 提交 OTP，TES 可能首次拦截，增加重试间隔和行为模拟
+                for attempt in range(5):
                     try:
                         submit_btn = page.locator('xpath=//form//button[@type="submit"]')
                         if await submit_btn.count() > 0 and await submit_btn.first.is_visible():
                             await _move_to_element(page, submit_btn.first)
+                            await asyncio.sleep(_random.uniform(0.2, 0.5))
                             await submit_btn.first.click()
                         else:
                             await page.keyboard.press("Enter")
                     except Exception:
                         pass
-                    log("验证码已提交")
-                    await asyncio.sleep(3)
+                    log(f"验证码已提交 ({attempt+1}/5)")
+                    # 递增等待：TES 首次拦截后需要更长时间重新评估
+                    wait_time = 3 + attempt * 2
+                    await asyncio.sleep(wait_time)
                     new_state = await detect_state()
                     if new_state != "OTP":
                         log("OTP 验证通过", "ok")
                         state = new_state
                         break
+                    # 如果还在 OTP 页面，检查是否有错误提示（TES 拦截）
+                    try:
+                        error_text = await page.evaluate("""() => {
+                            const alerts = document.querySelectorAll('[role="alert"], [class*="error"], [class*="Error"]');
+                            for (const el of alerts) {
+                                const t = el.innerText.trim();
+                                if (t && t.length > 3) return t;
+                            }
+                            return '';
+                        }""")
+                        if error_text:
+                            log(f"TES 拦截 ({attempt+1}/5), 重新模拟输入...", "warn")
+                            # 模拟人类看到错误后重新操作：点击输入框、清空、重新输入
+                            await page.mouse.move(
+                                _random.randint(200, 800), _random.randint(200, 500),
+                                steps=_random.randint(8, 15)
+                            )
+                            await _human_delay(1.5, 3.0)
+                            await _move_to_element(page, otp_input)
+                            await otp_input.click()
+                            await asyncio.sleep(_random.uniform(0.2, 0.4))
+                            # 全选并删除，模拟 Ctrl+A + Delete
+                            await page.keyboard.press("Control+a")
+                            await asyncio.sleep(_random.uniform(0.1, 0.3))
+                            await page.keyboard.press("Backspace")
+                            await asyncio.sleep(_random.uniform(0.3, 0.6))
+                            # 重新逐字输入
+                            for ch in otp_code:
+                                await page.keyboard.type(ch, delay=0)
+                                await asyncio.sleep(_random.uniform(0.06, 0.18))
+                            await _human_delay(0.8, 1.5)
+                    except Exception:
+                        pass
 
             # Phase 5: 密码设置
             if state not in ["DONE", "CONSENT", "CALLBACK"]:

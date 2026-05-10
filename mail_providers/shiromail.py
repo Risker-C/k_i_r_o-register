@@ -14,7 +14,10 @@ class ShiroMailProvider(MailProvider):
         from curl_cffi import requests as curl_requests
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
-        self.domain_id = int(domain_id) if domain_id else 0
+        if domain_id and str(domain_id).isdigit():
+            self.domain_id = int(domain_id)
+        else:
+            self.domain_id = 0
         self.session = curl_requests.Session(impersonate="chrome131")
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",

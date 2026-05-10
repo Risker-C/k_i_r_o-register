@@ -119,7 +119,7 @@ async def fill_stripe_checkout(payment_url, card_info, cdk_code, log=log, headle
     expiry_month = str(card_info["expiryMonth"]).zfill(2)
     expiry_year = str(card_info["expiryYear"])[-2:]
     name_on_card = card_info.get("nameOnCard", "Amy Allen")
-    billing_address = card_info.get("billingAddress", "")
+    billing_address = card_info.get("billingAddress", "") or card_info.get("nodeInstructions", "")
 
     addr_parts = [p.strip() for p in billing_address.split(",")]
     address_line1 = addr_parts[0] if len(addr_parts) > 0 else ""
